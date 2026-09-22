@@ -38,6 +38,20 @@ The API will run at:
 http://127.0.0.1:8000
 ```
 
+## Deploy On Railway
+
+This project includes:
+
+- `Dockerfile` for Railway's Dockerfile builder.
+- `railway.json` to select the Dockerfile builder and health-check `/openapi.json`.
+- A container start command that binds Uvicorn to `0.0.0.0` and Railway's `PORT` environment variable.
+
+Deploy from this folder with:
+
+```powershell
+railway up
+```
+
 ## Example Request
 
 ```bash
