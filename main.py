@@ -13,6 +13,22 @@ from starlette.responses import JSONResponse
 
 app = FastAPI(title="JSON-LD Price API")
 
+FETCH_TIMEOUT_SECONDS = 30
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/152.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Accept-Encoding": "identity",
+    "Connection": "close",
+}
+
 
 class PriceRequest(BaseModel):
     Url: str | None = None
@@ -63,14 +79,11 @@ def is_valid_url(url: str | None) -> bool:
 def fetch_html(url: str) -> str:
     request = Request(
         url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; JSON-LD-Price-API/1.0)",
-            "Accept": "text/html,application/xhtml+xml",
-        },
+        headers=REQUEST_HEADERS,
     )
 
     try:
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             return response.read().decode(charset, errors="replace")
     except HTTPError as exc:
@@ -176,6 +189,58 @@ def extract_price(json_ld: Any) -> str | None:
     return None
 
 
+def extract_assigned_json(html: str, assignment_name: str) -> Any | None:
+    marker = f"{assignment_name} ="
+    marker_index = html.find(marker)
+    if marker_index == -1:
+        return None
+
+    json_start = marker_index + len(marker)
+    while json_start < len(html) and html[json_start].isspace():
+        json_start += 1
+
+    try:
+        value, _ = json.JSONDecoder().raw_decode(html[json_start:])
+    except json.JSONDecodeError:
+        return None
+
+    return value
+
+
+def direct_embedded_price_from_object(item: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        price = stringify_price(item.get(key))
+        if price:
+            return price
+    return None
+
+
+def extract_embedded_price(data: Any) -> str | None:
+    candidates = walk_json_ld(data)
+
+    for keys in (
+        ("discountedPrice", "sellingPrice", "salePrice", "price"),
+        ("lowPrice", "highPrice"),
+        ("mrp", "listPrice"),
+    ):
+        for item in candidates:
+            price = direct_embedded_price_from_object(item, keys)
+            if price:
+                return price
+
+    return None
+
+
+def extract_price_from_html(html: str) -> str | None:
+    for assignment_name in ("window.__myx",):
+        embedded_data = extract_assigned_json(html, assignment_name)
+        price = extract_embedded_price(embedded_data)
+        if price:
+            return price
+
+    return None
+
+
 @app.post("/price")
 async def price(payload: PriceRequest):
     if not is_valid_url(payload.Url):
@@ -190,6 +255,9 @@ async def price(payload: PriceRequest):
 
     json_ld_blocks = get_json_ld_blocks(html)
     if not json_ld_blocks:
+        html_price = extract_price_from_html(html)
+        if html_price is not None:
+            return {"Price": html_price}
         return error("No JSON-LD script tag found on the page", status_code=404)
 
     parse_error_found = False
@@ -203,6 +271,10 @@ async def price(payload: PriceRequest):
         price_value = extract_price(json_ld)
         if price_value is not None:
             return {"Price": price_value}
+
+    html_price = extract_price_from_html(html)
+    if html_price is not None:
+        return {"Price": html_price}
 
     if parse_error_found:
         return error("No parseable JSON-LD block with a price was found")
